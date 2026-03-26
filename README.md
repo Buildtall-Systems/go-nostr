@@ -20,6 +20,16 @@ The upstream `nbd-wtf/go-nostr` repository has been archived. The Go module prox
 - NIP additions unrelated to buildtall.systems needs
 - Dependency upgrades beyond what security patches require
 
+### How to use this fork
+
+The module path remains `github.com/nbd-wtf/go-nostr` — no import changes required. To point a project at this fork, add a `replace` directive to your `go.mod`:
+
+```
+replace github.com/nbd-wtf/go-nostr => github.com/Buildtall-Systems/go-nostr buildtall
+```
+
+All existing imports (`github.com/nbd-wtf/go-nostr`, `github.com/nbd-wtf/go-nostr/nip19`, etc.) continue to work unchanged.
+
 ### Migration tracker
 
 See [Buildtall-Systems/operations#27](https://github.com/Buildtall-Systems/operations/issues/27) for the full migration epic. This fork will be archived once migration is complete.
