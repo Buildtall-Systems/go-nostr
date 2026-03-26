@@ -39,6 +39,10 @@ type Relay struct {
 	writeQueue                    chan writeRequest
 	subscriptionChannelCloseQueue chan *Subscription
 
+	authDone    chan struct{} // closed exactly once when auth succeeds (proactive or reactive)
+	authOnce    sync.Once    // guards authDone close to prevent double-close panic
+	challengeCh chan string   // buffered(1), notifies when a new challenge arrives from relay
+
 	// custom things that aren't often used
 	//
 	AssumeValid bool // this will skip verifying signatures for events received from this relay
@@ -61,6 +65,8 @@ func NewRelay(ctx context.Context, url string, opts ...RelayOption) *Relay {
 		writeQueue:                    make(chan writeRequest),
 		subscriptionChannelCloseQueue: make(chan *Subscription),
 		requestHeader:                 nil,
+		authDone:                      make(chan struct{}),
+		challengeCh:                   make(chan string, 1),
 	}
 
 	for _, opt := range opts {
@@ -127,6 +133,10 @@ func (r *Relay) Context() context.Context { return r.connectionContext }
 
 // IsConnected returns true if the connection to this relay seems to be active.
 func (r *Relay) IsConnected() bool { return r.connectionContext.Err() == nil }
+
+// AuthDone returns a channel that is closed when NIP-42 authentication
+// succeeds, whether via proactive PerformAuth or reactive Auth.
+func (r *Relay) AuthDone() <-chan struct{} { return r.authDone }
 
 // Connect tries to establish a websocket connection to r.URL.
 // If the context expires before the connection is complete, an error is returned.
@@ -271,6 +281,11 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 					continue
 				}
 				r.challenge = *env.Challenge
+				select {
+				case <-r.challengeCh:
+				default:
+				}
+				r.challengeCh <- *env.Challenge
 			case *EventEnvelope:
 				// we already have the subscription from the pre-check above, so we can just reuse it
 				if sub == nil {
@@ -353,7 +368,11 @@ func (r *Relay) Auth(ctx context.Context, sign func(event *Event) error) error {
 		return fmt.Errorf("error signing auth event: %w", err)
 	}
 
-	return r.publish(ctx, authEvent.ID, &AuthEnvelope{Event: authEvent})
+	if err := r.publish(ctx, authEvent.ID, &AuthEnvelope{Event: authEvent}); err != nil {
+		return err
+	}
+	r.authOnce.Do(func() { close(r.authDone) })
+	return nil
 }
 
 func (r *Relay) publish(ctx context.Context, id string, env Envelope) error {

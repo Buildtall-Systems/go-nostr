@@ -237,3 +237,226 @@ func parseSubscriptionMessage(t *testing.T, raw []stdjson.RawMessage) (subid str
 	}
 	return id, ff
 }
+
+// mockAuthHandler creates a websocket handler that simulates NIP-42 AUTH.
+// It sends an AUTH challenge, waits for the client's AUTH response, validates
+// the kind 22242 event, and sends an OK with the given acceptance result.
+func mockAuthHandler(challenge string, acceptAuth bool) func(*websocket.Conn) {
+	return func(conn *websocket.Conn) {
+		// send AUTH challenge
+		authMsg := []any{"AUTH", challenge}
+		if err := websocket.JSON.Send(conn, authMsg); err != nil {
+			return
+		}
+
+		// read client messages until we get an AUTH response
+		for {
+			var raw []stdjson.RawMessage
+			if err := websocket.JSON.Receive(conn, &raw); err != nil {
+				return
+			}
+			if len(raw) < 2 {
+				continue
+			}
+			var typ string
+			if err := stdjson.Unmarshal(raw[0], &typ); err != nil {
+				continue
+			}
+			if typ != "AUTH" {
+				continue
+			}
+
+			// parse the AUTH event to extract its ID
+			var event Event
+			if err := stdjson.Unmarshal(raw[1], &event); err != nil {
+				return
+			}
+
+			reason := ""
+			if !acceptAuth {
+				reason = "auth-required: rejected"
+			}
+			okMsg := []any{"OK", event.ID, acceptAuth, reason}
+			websocket.JSON.Send(conn, okMsg)
+			break
+		}
+
+		// keep connection alive
+		io.ReadAll(conn)
+	}
+}
+
+func TestAuthDoneInitiallyOpen(t *testing.T) {
+	r := NewRelay(context.Background(), "wss://example.com")
+	select {
+	case <-r.AuthDone():
+		t.Fatal("AuthDone channel should not be closed on a new relay")
+	default:
+	}
+}
+
+func TestChallengeChanReceivesChallenge(t *testing.T) {
+	challenge := "test-challenge-abc123"
+	ws := newWebsocketServer(func(conn *websocket.Conn) {
+		authMsg := []any{"AUTH", challenge}
+		websocket.JSON.Send(conn, authMsg)
+		io.ReadAll(conn)
+	})
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	select {
+	case got := <-rl.challengeCh:
+		assert.Equal(t, challenge, got)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for challenge on challengeCh")
+	}
+	assert.Equal(t, challenge, rl.challenge)
+}
+
+func TestAuthDoneClosesOnSuccess(t *testing.T) {
+	challenge := "test-challenge-success"
+	ws := newWebsocketServer(mockAuthHandler(challenge, true))
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	// wait for challenge to arrive
+	select {
+	case <-rl.challengeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for challenge")
+	}
+
+	err := rl.Auth(context.Background(), func(ev *Event) error {
+		return ev.Sign(GeneratePrivateKey())
+	})
+	assert.NoError(t, err)
+
+	select {
+	case <-rl.AuthDone():
+	default:
+		t.Fatal("AuthDone channel should be closed after successful Auth")
+	}
+}
+
+func TestAuthDoneNotClosedOnFailure(t *testing.T) {
+	challenge := "test-challenge-failure"
+	ws := newWebsocketServer(mockAuthHandler(challenge, false))
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	select {
+	case <-rl.challengeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for challenge")
+	}
+
+	err := rl.Auth(context.Background(), func(ev *Event) error {
+		return ev.Sign(GeneratePrivateKey())
+	})
+	assert.Error(t, err)
+
+	select {
+	case <-rl.AuthDone():
+		t.Fatal("AuthDone channel should NOT be closed after failed Auth")
+	default:
+	}
+}
+
+func TestAuthDoneDoubleSuccess(t *testing.T) {
+	// mock relay that accepts AUTH twice
+	ws := newWebsocketServer(func(conn *websocket.Conn) {
+		challenge := "double-success-challenge"
+		websocket.JSON.Send(conn, []any{"AUTH", challenge})
+
+		for i := 0; i < 2; i++ {
+			for {
+				var raw []stdjson.RawMessage
+				if err := websocket.JSON.Receive(conn, &raw); err != nil {
+					return
+				}
+				if len(raw) < 2 {
+					continue
+				}
+				var typ string
+				if err := stdjson.Unmarshal(raw[0], &typ); err != nil {
+					continue
+				}
+				if typ != "AUTH" {
+					continue
+				}
+				var event Event
+				if err := stdjson.Unmarshal(raw[1], &event); err != nil {
+					return
+				}
+				websocket.JSON.Send(conn, []any{"OK", event.ID, true, ""})
+				break
+			}
+		}
+		io.ReadAll(conn)
+	})
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	select {
+	case <-rl.challengeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for challenge")
+	}
+
+	sign := func(ev *Event) error { return ev.Sign(GeneratePrivateKey()) }
+
+	err := rl.Auth(context.Background(), sign)
+	assert.NoError(t, err)
+
+	// second Auth call should not panic (sync.Once guards the close)
+	err = rl.Auth(context.Background(), sign)
+	assert.NoError(t, err)
+
+	select {
+	case <-rl.AuthDone():
+	default:
+		t.Fatal("AuthDone should be closed")
+	}
+}
+
+func TestChallengeChanReplacesOld(t *testing.T) {
+	first := "challenge-first"
+	second := "challenge-second"
+	ws := newWebsocketServer(func(conn *websocket.Conn) {
+		websocket.JSON.Send(conn, []any{"AUTH", first})
+		time.Sleep(100 * time.Millisecond)
+		websocket.JSON.Send(conn, []any{"AUTH", second})
+		io.ReadAll(conn)
+	})
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	// wait long enough for both challenges to arrive
+	time.Sleep(500 * time.Millisecond)
+
+	// only the latest challenge should be available
+	select {
+	case got := <-rl.challengeCh:
+		assert.Equal(t, second, got)
+	default:
+		t.Fatal("expected a challenge on challengeCh")
+	}
+
+	// channel should be empty now
+	select {
+	case extra := <-rl.challengeCh:
+		t.Fatalf("expected empty channel, got %q", extra)
+	default:
+	}
+}
