@@ -375,6 +375,22 @@ func (r *Relay) Auth(ctx context.Context, sign func(event *Event) error) error {
 	return nil
 }
 
+// PerformAuth blocks until a NIP-42 challenge is available (or uses one already
+// received), signs and sends the AUTH event, and waits for the relay's OK.
+// On success AuthDone() will be closed.
+func (r *Relay) PerformAuth(ctx context.Context, sign func(event *Event) error) error {
+	if r.challenge == "" {
+		select {
+		case <-r.challengeCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.connectionContext.Done():
+			return fmt.Errorf("connection closed while waiting for auth challenge")
+		}
+	}
+	return r.Auth(ctx, sign)
+}
+
 func (r *Relay) publish(ctx context.Context, id string, env Envelope) error {
 	var err error
 	var cancel context.CancelFunc

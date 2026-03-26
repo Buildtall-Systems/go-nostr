@@ -460,3 +460,139 @@ func TestChallengeChanReplacesOld(t *testing.T) {
 	default:
 	}
 }
+
+func TestPerformAuthHappyPath(t *testing.T) {
+	challenge := "perform-auth-happy"
+	ws := newWebsocketServer(func(conn *websocket.Conn) {
+		time.Sleep(100 * time.Millisecond)
+		websocket.JSON.Send(conn, []any{"AUTH", challenge})
+
+		for {
+			var raw []stdjson.RawMessage
+			if err := websocket.JSON.Receive(conn, &raw); err != nil {
+				return
+			}
+			if len(raw) < 2 {
+				continue
+			}
+			var typ string
+			if err := stdjson.Unmarshal(raw[0], &typ); err != nil {
+				continue
+			}
+			if typ != "AUTH" {
+				continue
+			}
+			var event Event
+			if err := stdjson.Unmarshal(raw[1], &event); err != nil {
+				return
+			}
+			websocket.JSON.Send(conn, []any{"OK", event.ID, true, ""})
+			break
+		}
+		io.ReadAll(conn)
+	})
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	err := rl.PerformAuth(context.Background(), func(ev *Event) error {
+		return ev.Sign(GeneratePrivateKey())
+	})
+	assert.NoError(t, err)
+
+	select {
+	case <-rl.AuthDone():
+	default:
+		t.Fatal("AuthDone should be closed after PerformAuth success")
+	}
+}
+
+func TestPerformAuthChallengeAlreadyAvailable(t *testing.T) {
+	challenge := "pre-existing-challenge"
+	ws := newWebsocketServer(mockAuthHandler(challenge, true))
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	// wait for challenge to arrive on the channel so r.challenge is set
+	select {
+	case <-rl.challengeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for challenge")
+	}
+
+	// r.challenge is now set; PerformAuth should skip waiting
+	err := rl.PerformAuth(context.Background(), func(ev *Event) error {
+		return ev.Sign(GeneratePrivateKey())
+	})
+	assert.NoError(t, err)
+
+	select {
+	case <-rl.AuthDone():
+	default:
+		t.Fatal("AuthDone should be closed")
+	}
+}
+
+func TestPerformAuthContextTimeout(t *testing.T) {
+	// relay that never sends AUTH challenge
+	ws := newWebsocketServer(func(conn *websocket.Conn) {
+		io.ReadAll(conn)
+	})
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := rl.PerformAuth(ctx, func(ev *Event) error {
+		return ev.Sign(GeneratePrivateKey())
+	})
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	select {
+	case <-rl.AuthDone():
+		t.Fatal("AuthDone should NOT be closed after timeout")
+	default:
+	}
+}
+
+func TestPerformAuthConnectionDeath(t *testing.T) {
+	ws := newWebsocketServer(func(conn *websocket.Conn) {
+		time.Sleep(100 * time.Millisecond)
+		conn.Close()
+	})
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	err := rl.PerformAuth(context.Background(), func(ev *Event) error {
+		return ev.Sign(GeneratePrivateKey())
+	})
+	assert.Error(t, err)
+}
+
+func TestPerformAuthRelayRejectsAuth(t *testing.T) {
+	challenge := "perform-auth-rejected"
+	ws := newWebsocketServer(mockAuthHandler(challenge, false))
+	defer ws.Close()
+
+	rl := mustRelayConnect(t, ws.URL)
+	defer rl.Close()
+
+	err := rl.PerformAuth(context.Background(), func(ev *Event) error {
+		return ev.Sign(GeneratePrivateKey())
+	})
+	assert.Error(t, err)
+
+	select {
+	case <-rl.AuthDone():
+		t.Fatal("AuthDone should NOT be closed after rejected auth")
+	default:
+	}
+}
