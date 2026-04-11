@@ -15,27 +15,48 @@ type Client struct {
 	signer      nostr.Signer
 }
 
+// ClientOption configures a Client at construction time.
+type ClientOption func(*Client)
+
+// WithReadTimeout sets the fasthttp per-operation read timeout on the client.
+// Defaults to zero (no per-operation read timeout) when not set.
+func WithReadTimeout(d time.Duration) ClientOption {
+	return func(c *Client) {
+		c.httpClient.ReadTimeout = d
+	}
+}
+
+// WithWriteTimeout sets the fasthttp per-operation write timeout on the client.
+// Defaults to zero (no per-operation write timeout) when not set.
+func WithWriteTimeout(d time.Duration) ClientOption {
+	return func(c *Client) {
+		c.httpClient.WriteTimeout = d
+	}
+}
+
 // NewClient creates a new Blossom client
-func NewClient(mediaserver string, signer nostr.Signer) *Client {
+func NewClient(mediaserver string, signer nostr.Signer, opts ...ClientOption) *Client {
 	if !strings.HasPrefix(mediaserver, "http") {
 		mediaserver = "https://" + mediaserver
 	}
 
-	return &Client{
+	c := &Client{
 		mediaserver: strings.TrimSuffix(mediaserver, "/") + "/",
 		httpClient:  createHTTPClient(),
 		signer:      signer,
 	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
 }
 
 // createHTTPClient creates a properly configured HTTP client
 func createHTTPClient() *fasthttp.Client {
-	readTimeout, _ := time.ParseDuration("10s")
-	writeTimeout, _ := time.ParseDuration("10s")
 	maxIdleConnDuration, _ := time.ParseDuration("1h")
 	return &fasthttp.Client{
-		ReadTimeout:                   readTimeout,
-		WriteTimeout:                  writeTimeout,
 		MaxIdleConnDuration:           maxIdleConnDuration,
 		NoDefaultUserAgentHeader:      true, // Don't send: User-Agent: fasthttp
 		DisableHeaderNamesNormalizing: true, // If you set the case on your headers correctly you can enable this
