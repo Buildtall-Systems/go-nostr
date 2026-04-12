@@ -23,7 +23,8 @@ type Relay struct {
 	closeMutex sync.Mutex
 
 	URL           string
-	requestHeader http.Header // e.g. for origin header
+	requestHeader http.Header  // e.g. for origin header
+	httpClient    *http.Client // optional caller-supplied HTTP client (e.g. SOCKS5-routed)
 
 	Connection    *Connection
 	Subscriptions *xsync.MapOf[int64, *Subscription]
@@ -97,6 +98,7 @@ var (
 	_ RelayOption = (WithNoticeHandler)(nil)
 	_ RelayOption = (WithCustomHandler)(nil)
 	_ RelayOption = (WithRequestHeader)(nil)
+	_ RelayOption = (*WithHTTPClient)(nil)
 )
 
 // WithNoticeHandler just takes notices and is expected to do something with them.
@@ -120,6 +122,14 @@ type WithRequestHeader http.Header
 
 func (ch WithRequestHeader) ApplyRelayOption(r *Relay) {
 	r.requestHeader = http.Header(ch)
+}
+
+// WithHTTPClient sets a custom HTTP client used for the WebSocket dial.
+// Use this to route connections through a proxy (e.g. SOCKS5).
+type WithHTTPClient struct{ Client *http.Client }
+
+func (wh *WithHTTPClient) ApplyRelayOption(r *Relay) {
+	r.httpClient = wh.Client
 }
 
 // String just returns the relay URL.
@@ -166,7 +176,7 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 		defer cancel()
 	}
 
-	conn, err := NewConnection(ctx, r.URL, r.requestHeader, tlsConfig)
+	conn, err := NewConnection(ctx, r.URL, r.requestHeader, tlsConfig, r.httpClient)
 	if err != nil {
 		return fmt.Errorf("error opening websocket to '%s': %w", r.URL, err)
 	}
