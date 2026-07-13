@@ -357,7 +357,9 @@ func (pool *SimplePool) FetchManyReplaceable(
 			}
 			return latest, false // the one we had was already more recent
 		})
-		return updated
+		// WithCheckDuplicateReplaceable follows the "true == skip this event" contract
+		// (see relay.go). Skip the staler duplicates; let the newest event through.
+		return !updated
 	}))
 
 	for _, url := range urls {

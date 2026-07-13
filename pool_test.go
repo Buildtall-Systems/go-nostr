@@ -169,3 +169,78 @@ func TestWithProactiveAuthAuthDoneClosed(t *testing.T) {
 		t.Fatal("AuthDone should be closed after proactive auth in EnsureRelay")
 	}
 }
+
+// mockReplaceableHandler replays a fixed set of events for any REQ, then EOSE.
+// It drives FetchManyReplaceable against one deterministic relay.
+func mockReplaceableHandler(evts []Event) func(*websocket.Conn) {
+	return func(conn *websocket.Conn) {
+		for {
+			var raw []stdjson.RawMessage
+			if err := websocket.JSON.Receive(conn, &raw); err != nil {
+				return
+			}
+			if len(raw) < 2 {
+				continue
+			}
+			var typ string
+			if err := stdjson.Unmarshal(raw[0], &typ); err != nil {
+				continue
+			}
+			if typ != "REQ" {
+				continue // ignore CLOSE and anything else
+			}
+			var subID string
+			if err := stdjson.Unmarshal(raw[1], &subID); err != nil {
+				return
+			}
+			for _, evt := range evts {
+				websocket.JSON.Send(conn, []any{"EVENT", subID, evt})
+			}
+			websocket.JSON.Send(conn, []any{"EOSE", subID})
+		}
+	}
+}
+
+// TestFetchManyReplaceableReturnsNewest guards the WithCheckDuplicateReplaceable
+// polarity: a single relay streaming a stale then a fresh copy of the same
+// addressable event must yield exactly the newest. An inverted duplicate check
+// skips every fresh event and returns an empty set.
+func TestFetchManyReplaceableReturnsNewest(t *testing.T) {
+	priv := GeneratePrivateKey()
+	pub, err := GetPublicKey(priv)
+	require.NoError(t, err)
+
+	const dTag = "trust-target"
+	mkAssertion := func(rank string, ts Timestamp) Event {
+		evt := Event{
+			Kind:      30382, // NIP-85 trusted assertion (addressable)
+			CreatedAt: ts,
+			Tags:      Tags{{"d", dTag}, {"rank", rank}},
+		}
+		require.NoError(t, evt.Sign(priv))
+		return evt
+	}
+
+	// Stale first, fresh second: newest must win regardless of arrival order.
+	stale := mkAssertion("50", 1000)
+	fresh := mkAssertion("85", 2000)
+
+	ws := newWebsocketServer(mockReplaceableHandler([]Event{stale, fresh}))
+	defer ws.Close()
+	url := strings.Replace(ws.URL, "http://", "ws://", 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool := NewSimplePool(ctx)
+	results := pool.FetchManyReplaceable(
+		ctx,
+		[]string{url},
+		Filter{Kinds: []int{30382}, Authors: []string{pub}},
+	)
+
+	require.Equal(t, 1, results.Size(), "one (pubkey,d-tag) => exactly one surviving result")
+	got, ok := results.Load(ReplaceableKey{pub, dTag})
+	require.True(t, ok, "the fresh addressable event must survive the duplicate check")
+	assert.Equal(t, Timestamp(2000), got.CreatedAt, "newest-wins reduction")
+}
