@@ -14,7 +14,7 @@ func (c *Client) Delete(ctx context.Context, hash string) error {
 			evt.Tags = append(evt.Tags, nostr.Tag{"t", "delete"})
 			evt.Tags = append(evt.Tags, nostr.Tag{"x", hash})
 		})
-	}, nil, 0, nil)
+	}, nil, nil, 0, nil)
 	if err != nil {
 		return fmt.Errorf("failed to delete %s: %w", hash, err)
 	}

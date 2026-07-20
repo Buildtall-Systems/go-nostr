@@ -66,6 +66,70 @@ func TestUploadFileWithProgress(t *testing.T) {
 	}
 }
 
+func TestUploadFileWithHeaders(t *testing.T) {
+	content := []byte("gated-upload")
+	path := writeUploadInput(t, content)
+
+	var gotPolicy []string
+	var gotGrants []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPolicy = r.Header.Values("X-Access-Policy")
+		gotGrants = r.Header.Values("X-Access-Grant")
+		if err := json.NewEncoder(w).Encode(BlobDescriptor{
+			URL:    "https://blossom.example/blob",
+			SHA256: strings.Repeat("d", 64),
+			Size:   len(content),
+		}); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, stubSigner{})
+
+	_, err := c.UploadFile(context.Background(), path,
+		WithUploadHeader("X-Access-Policy", "private"),
+		WithUploadHeader("X-Access-Grant", "npub1alice"),
+		WithUploadHeader("X-Access-Grant", "npub1bob"),
+	)
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	if len(gotPolicy) != 1 || gotPolicy[0] != "private" {
+		t.Errorf("X-Access-Policy: want [private], got %v", gotPolicy)
+	}
+	if len(gotGrants) != 2 || gotGrants[0] != "npub1alice" || gotGrants[1] != "npub1bob" {
+		t.Errorf("X-Access-Grant: want [npub1alice npub1bob], got %v", gotGrants)
+	}
+}
+
+func TestUploadFileNoOptionsSendsNoExtraHeaders(t *testing.T) {
+	content := []byte("plain-upload-headers")
+	path := writeUploadInput(t, content)
+
+	var gotPolicy []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPolicy = r.Header.Values("X-Access-Policy")
+		if err := json.NewEncoder(w).Encode(BlobDescriptor{
+			URL:    "https://blossom.example/blob",
+			SHA256: strings.Repeat("d", 64),
+			Size:   len(content),
+		}); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, stubSigner{})
+
+	if _, err := c.UploadFile(context.Background(), path); err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	if len(gotPolicy) != 0 {
+		t.Errorf("X-Access-Policy: want none, got %v", gotPolicy)
+	}
+}
+
 func TestUploadFileNilProgress(t *testing.T) {
 	content := []byte("plain-upload")
 	path := writeUploadInput(t, content)

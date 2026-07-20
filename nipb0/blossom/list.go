@@ -19,7 +19,7 @@ func (c *Client) List(ctx context.Context) ([]BlobDescriptor, error) {
 		return c.authorizationHeader(ctx, func(evt *nostr.Event) {
 			evt.Tags = append(evt.Tags, nostr.Tag{"t", "list"})
 		})
-	}, nil, 0, &bds)
+	}, nil, nil, 0, &bds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list blobs: %w", err)
 	}

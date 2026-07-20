@@ -19,6 +19,7 @@ func (c *Client) httpCall(
 	url string,
 	contentType string,
 	addAuthorization func() string,
+	extraHeaders [][2]string,
 	body io.Reader,
 	contentSize int64,
 	result any,
@@ -31,6 +32,10 @@ func (c *Client) httpCall(
 	req.SetRequestURI(c.mediaserver + url)
 	req.Header.SetMethod(method)
 	req.Header.SetContentType(contentType)
+
+	for _, header := range extraHeaders {
+		req.Header.Add(header[0], header[1])
+	}
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
