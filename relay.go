@@ -33,6 +33,7 @@ type Relay struct {
 	connectionContext       context.Context // will be canceled when the connection closes
 	connectionContextCancel context.CancelCauseFunc
 
+	challengeMu                   sync.Mutex   // guards challenge; not closeMutex, so auth never orders against teardown
 	challenge                     string       // NIP-42 challenge, we only keep the last
 	noticeHandler                 func(string) // NIP-01 NOTICEs
 	customHandler                 func(string) // nonstandard unparseable messages
@@ -147,6 +148,25 @@ func (r *Relay) IsConnected() bool { return r.connectionContext.Err() == nil }
 // AuthDone returns a channel that is closed when NIP-42 authentication
 // succeeds, whether via proactive PerformAuth or reactive Auth.
 func (r *Relay) AuthDone() <-chan struct{} { return r.authDone }
+
+// setChallenge records the newest NIP-42 challenge. Called only from the
+// message read loop.
+func (r *Relay) setChallenge(challenge string) {
+	r.challengeMu.Lock()
+	r.challenge = challenge
+	r.challengeMu.Unlock()
+}
+
+// currentChallenge returns the newest NIP-42 challenge, or "" if none has
+// arrived. The read loop writes the field while callers read it from their own
+// goroutines, so every access is guarded: an unsynchronized read can tear the
+// string header, and a stale one gets stamped into an AUTH event the relay then
+// rejects.
+func (r *Relay) currentChallenge() string {
+	r.challengeMu.Lock()
+	defer r.challengeMu.Unlock()
+	return r.challenge
+}
 
 // Connect tries to establish a websocket connection to r.URL.
 // If the context expires before the connection is complete, an error is returned.
@@ -306,7 +326,7 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 				if env.Challenge == nil {
 					continue
 				}
-				r.challenge = *env.Challenge
+				r.setChallenge(*env.Challenge)
 				select {
 				case <-r.challengeCh:
 				default:
@@ -386,7 +406,7 @@ func (r *Relay) Auth(ctx context.Context, sign func(event *Event) error) error {
 		Kind:      KindClientAuthentication,
 		Tags: Tags{
 			Tag{"relay", r.URL},
-			Tag{"challenge", r.challenge},
+			Tag{"challenge", r.currentChallenge()},
 		},
 		Content: "",
 	}
@@ -405,7 +425,7 @@ func (r *Relay) Auth(ctx context.Context, sign func(event *Event) error) error {
 // received), signs and sends the AUTH event, and waits for the relay's OK.
 // On success AuthDone() will be closed.
 func (r *Relay) PerformAuth(ctx context.Context, sign func(event *Event) error) error {
-	if r.challenge == "" {
+	if r.currentChallenge() == "" {
 		select {
 		case <-r.challengeCh:
 		case <-ctx.Done():
