@@ -189,10 +189,21 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 	go func() {
 		defer func() {
 			ticker.Stop()
+
+			// close() reads and dereferences Connection under closeMutex, and
+			// it is close() that cancels connectionContext and so schedules
+			// this very cleanup. Without the lock the nil assignment can land
+			// between close()'s nil check and its Close() call, dereferencing
+			// nil.
+			// ConnectionError is written by the read loop under the same lock,
+			// so it is snapshotted here rather than read inside the loop below.
+			r.closeMutex.Lock()
 			r.Connection = nil
+			connErr := r.ConnectionError
+			r.closeMutex.Unlock()
 
 			for _, sub := range r.Subscriptions.Range {
-				sub.unsub(fmt.Errorf("relay connection closed: %w / %w", context.Cause(r.connectionContext), r.ConnectionError))
+				sub.unsub(fmt.Errorf("relay connection closed: %w / %w", context.Cause(r.connectionContext), connErr))
 			}
 		}()
 
@@ -243,7 +254,12 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 			buf.Reset()
 
 			if err := conn.ReadMessage(r.connectionContext, buf); err != nil {
+				// Released before close(), which takes the same non-reentrant
+				// lock.
+				r.closeMutex.Lock()
 				r.ConnectionError = err
+				r.closeMutex.Unlock()
+
 				r.close(err)
 				break
 			}
@@ -456,7 +472,13 @@ func (r *Relay) publish(ctx context.Context, id string, env Envelope) error {
 func (r *Relay) Subscribe(ctx context.Context, filters Filters, opts ...SubscriptionOption) (*Subscription, error) {
 	sub := r.PrepareSubscription(ctx, filters, opts...)
 
-	if r.Connection == nil {
+	// Read under closeMutex: the write pump nils Connection on teardown, so an
+	// unguarded read here races a concurrent disconnect.
+	r.closeMutex.Lock()
+	connected := r.Connection != nil
+	r.closeMutex.Unlock()
+
+	if !connected {
 		return nil, fmt.Errorf("not connected to %s", r.URL)
 	}
 
