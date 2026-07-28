@@ -141,7 +141,7 @@ func NewBunker(
 			if resp.Result == "auth_url" {
 				// special case
 				authURL := resp.Error
-				if _, ok := bunker.expectingAuth.Load(resp.ID); ok {
+				if _, ok := bunker.expectingAuth.Load(resp.ID); ok && bunker.onAuth != nil {
 					bunker.onAuth(authURL)
 				}
 				continue
@@ -257,7 +257,9 @@ func (bunker *BunkerClient) RPC(ctx context.Context, method string, params []str
 
 	respWaiter := make(chan Response)
 	bunker.listeners.Store(id, respWaiter)
+	bunker.expectingAuth.Store(id, struct{}{})
 	defer func() {
+		bunker.expectingAuth.Delete(id)
 		bunker.listeners.Delete(id)
 		close(respWaiter)
 	}()
