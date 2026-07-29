@@ -154,7 +154,13 @@ func NewBunker(
 			}
 
 			if dispatcher, ok := bunker.listeners.Load(resp.ID); ok {
-				dispatcher <- resp
+				// Never block the dispatcher. A signer that answers one id
+				// twice would otherwise stall every later response for this
+				// client, since this loop is the only reader.
+				select {
+				case dispatcher <- resp:
+				default:
+				}
 				continue
 			}
 		}
@@ -261,13 +267,17 @@ func (bunker *BunkerClient) RPC(ctx context.Context, method string, params []str
 		return "", fmt.Errorf("failed to sign request event: %w", err)
 	}
 
-	respWaiter := make(chan Response)
+	// Buffered, and never closed. The dispatch goroutine can load this channel
+	// and still be about to send when RPC returns on a cancelled context;
+	// closing it here made that a send on a closed channel, which panics.
+	// Leaving it open lets it be collected instead. One slot is enough,
+	// because exactly one response resolves an id.
+	respWaiter := make(chan Response, 1)
 	bunker.listeners.Store(id, respWaiter)
 	bunker.expectingAuth.Store(id, struct{}{})
 	defer func() {
 		bunker.expectingAuth.Delete(id)
 		bunker.listeners.Delete(id)
-		close(respWaiter)
 	}()
 	hasWorked := make(chan struct{})
 
