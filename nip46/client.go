@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/url"
+	"slices"
 	"strconv"
 	"sync/atomic"
 
@@ -103,7 +104,7 @@ func NewBunker(
 		pool:            pool,
 		clientSecretKey: clientSecretKey,
 		target:          targetPublicKey,
-		relays:          relays,
+		relays:          slices.Clone(relays),
 		conversationKey: conversationKey,
 		listeners:       xsync.NewMapOf[string, chan Response](),
 		expectingAuth:   xsync.NewMapOf[string, struct{}](),
@@ -111,9 +112,14 @@ func NewBunker(
 		idPrefix:        "gn-" + strconv.Itoa(rand.Intn(65536)),
 	}
 
+	// SimplePool.subMany normalizes the URL slice it is handed in place, and
+	// RPC iterates bunker.relays concurrently from the caller's goroutine.
+	// Give each its own copy so the two never touch the same backing array.
+	subscriptionRelays := slices.Clone(relays)
+
 	go func() {
 		now := nostr.Now()
-		events := pool.SubscribeMany(ctx, relays, nostr.Filter{
+		events := pool.SubscribeMany(ctx, subscriptionRelays, nostr.Filter{
 			Tags:      nostr.TagMap{"p": []string{clientPublicKey}},
 			Kinds:     []int{nostr.KindNostrConnect},
 			Since:     &now,
