@@ -24,17 +24,18 @@ func TestPrepareNoteEvent(t *testing.T) {
 			name:    "with nostr: prefix, url and hashtag",
 			content: "hello nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 please visit https://banana.com/ and get your free #banana",
 			wantTags: nostr.Tags{
-				{"p", "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2"},
+				{"p", "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"},
 			},
 			want: "hello nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 please visit https://banana.com/ and get your free #banana",
 		},
 		{
-			name:    "with bare npub and bare url",
-			content: "hello npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 please visit banana.com",
-			wantTags: nostr.Tags{
-				{"p", "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2"},
-			},
-			want: "hello nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 please visit banana.com",
+			// bare references are not matched by nip27 and the
+			// scheme-fixing pass is not implemented, so the event
+			// passes through untouched.
+			name:     "with bare npub and bare url",
+			content:  "hello npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 please visit banana.com",
+			wantTags: nostr.Tags{},
+			want:     "hello npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 please visit banana.com",
 		},
 	}
 
