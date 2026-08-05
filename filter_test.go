@@ -142,6 +142,50 @@ func TestFilterClone(t *testing.T) {
 	assert.False(t, FilterEqual(flt, clone4), "modifying the clone since should cause it to not be equal anymore")
 }
 
+func TestFilterOrderUntilIDRoundTrip(t *testing.T) {
+	until := Timestamp(1700000000)
+	f := Filter{
+		Kinds:   []int{30023},
+		Until:   &until,
+		Limit:   25,
+		Order:   "published_at",
+		UntilID: "4142ac437323d523d7da807e5693eaced5a8d82eb5f47b5940a244b4237ac786",
+	}
+
+	j, err := json.Marshal(f)
+	assert.NoError(t, err)
+	assert.Equal(t,
+		`{"kinds":[30023],"until":1700000000,"limit":25,"order":"published_at","until_id":"4142ac437323d523d7da807e5693eaced5a8d82eb5f47b5940a244b4237ac786"}`,
+		string(j))
+
+	var back Filter
+	require.NoError(t, json.Unmarshal(j, &back))
+	assert.Equal(t, f.Order, back.Order)
+	assert.Equal(t, f.UntilID, back.UntilID)
+	assert.True(t, FilterEqual(f, back), "round-tripped filter must compare equal")
+
+	clone := f.Clone()
+	assert.True(t, FilterEqual(f, clone), "clone must carry order and until_id")
+
+	clone1 := f.Clone()
+	clone1.Order = ""
+	assert.False(t, FilterEqual(f, clone1), "FilterEqual must distinguish order")
+
+	clone2 := f.Clone()
+	clone2.UntilID = ""
+	assert.False(t, FilterEqual(f, clone2), "FilterEqual must distinguish until_id")
+}
+
+func TestFilterAbsentOrderKeysEmitNothing(t *testing.T) {
+	f := Filter{
+		Search: "test",
+		Limit:  10,
+	}
+	j, err := json.Marshal(f)
+	assert.NoError(t, err)
+	assert.Equal(t, `{"limit":10,"search":"test"}`, string(j))
+}
+
 func TestTheoreticalLimit(t *testing.T) {
 	require.Equal(t, 6, GetTheoreticalLimit(Filter{IDs: []string{"a", "b", "c", "d", "e", "f"}}))
 	require.Equal(t, 9, GetTheoreticalLimit(Filter{Authors: []string{"a", "b", "c"}, Kinds: []int{3, 0, 10002}}))

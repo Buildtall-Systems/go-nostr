@@ -17,6 +17,8 @@ type Filter struct {
 	Until   *Timestamp
 	Limit   int
 	Search  string
+	Order   string
+	UntilID string
 
 	// LimitZero is or must be set when there is a "limit":0 in the filter, and not when "limit" is just omitted
 	LimitZero bool `json:"-"`
@@ -133,6 +135,14 @@ func FilterEqual(a Filter, b Filter) bool {
 		return false
 	}
 
+	if a.Order != b.Order {
+		return false
+	}
+
+	if a.UntilID != b.UntilID {
+		return false
+	}
+
 	if a.LimitZero != b.LimitZero {
 		return false
 	}
@@ -147,6 +157,8 @@ func (ef Filter) Clone() Filter {
 		Kinds:     slices.Clone(ef.Kinds),
 		Limit:     ef.Limit,
 		Search:    ef.Search,
+		Order:     ef.Order,
+		UntilID:   ef.UntilID,
 		LimitZero: ef.LimitZero,
 	}
 
