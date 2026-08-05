@@ -195,3 +195,57 @@ func TestTheoreticalLimit(t *testing.T) {
 	require.Equal(t, 24, GetTheoreticalLimit(Filter{Authors: []string{"a", "b", "c", "d", "e", "f"}, Kinds: []int{30023, 30024}, Tags: TagMap{"d": []string{"aaa", "bbb"}}}))
 	require.Equal(t, -1, GetTheoreticalLimit(Filter{Authors: []string{"a", "b", "c", "d", "e", "f"}, Kinds: []int{30023, 30024}}))
 }
+
+func TestPublishedTime(t *testing.T) {
+	evt := Event{CreatedAt: 200, Tags: Tags{{"published_at", "100"}}}
+	assert.Equal(t, Timestamp(100), evt.PublishedTime(), "tag value wins")
+
+	evt = Event{CreatedAt: 200}
+	assert.Equal(t, Timestamp(200), evt.PublishedTime(), "missing tag falls back to CreatedAt")
+
+	evt = Event{CreatedAt: 200, Tags: Tags{{"published_at", "2006-01-02"}}}
+	assert.Equal(t, Timestamp(200), evt.PublishedTime(), "unparseable tag falls back to CreatedAt")
+
+	evt = Event{CreatedAt: 200, Tags: Tags{
+		{"published_at", "not-a-number"},
+		{"published_at", "100"},
+		{"published_at", "50"},
+	}}
+	assert.Equal(t, Timestamp(100), evt.PublishedTime(), "first parseable value wins")
+
+	evt = Event{CreatedAt: 200, Tags: Tags{{"published_at"}}}
+	assert.Equal(t, Timestamp(200), evt.PublishedTime(), "bare tag falls back to CreatedAt")
+
+	evt = Event{CreatedAt: 200, Tags: Tags{{"published_at", "-5"}}}
+	assert.Equal(t, Timestamp(200), evt.PublishedTime(), "negative value falls back to CreatedAt")
+}
+
+func TestFilterMatchesOrderPublicationAxis(t *testing.T) {
+	until := Timestamp(1000)
+	since := Timestamp(500)
+
+	// an article published before the cursor but re-signed after it: the
+	// order-extended filter must keep it, the stock filter must not.
+	reminted := Event{Kind: 30023, CreatedAt: 1500, Tags: Tags{{"published_at", "900"}}}
+	ordered := Filter{Kinds: []int{30023}, Order: "published_at", Until: &until}
+	stock := Filter{Kinds: []int{30023}, Until: &until}
+	assert.True(t, ordered.Matches(&reminted), "order filter bounds the publication axis")
+	assert.False(t, stock.Matches(&reminted), "stock filter keeps created_at semantics")
+
+	published := Event{Kind: 30023, CreatedAt: 800, Tags: Tags{{"published_at", "1100"}}}
+	assert.False(t, ordered.Matches(&published), "publication after until fails the order filter")
+	assert.True(t, stock.Matches(&published), "created_at within until passes the stock filter")
+
+	sinceOrdered := Filter{Kinds: []int{30023}, Order: "published_at", Since: &since}
+	early := Event{Kind: 30023, CreatedAt: 700, Tags: Tags{{"published_at", "400"}}}
+	assert.False(t, sinceOrdered.Matches(&early), "publication before since fails the order filter")
+	late := Event{Kind: 30023, CreatedAt: 400, Tags: Tags{{"published_at", "700"}}}
+	assert.True(t, sinceOrdered.Matches(&late), "publication after since passes the order filter")
+
+	untagged := Event{Kind: 30023, CreatedAt: 900}
+	assert.True(t, ordered.Matches(&untagged), "no tag: order filter falls back to created_at")
+
+	cursored := Filter{Kinds: []int{30023}, Order: "published_at", Until: &until,
+		UntilID: "4142ac437323d523d7da807e5693eaced5a8d82eb5f47b5940a244b4237ac786"}
+	assert.True(t, cursored.Matches(&reminted), "until_id is ignored for matching")
+}

@@ -59,11 +59,19 @@ func (ef Filter) Matches(event *Event) bool {
 		return false
 	}
 
-	if ef.Since != nil && event.CreatedAt < *ef.Since {
+	// with the order extension, since/until bound the publication axis.
+	// UntilID addresses stored-query resumption only and is deliberately
+	// ignored for matching, mirroring the relay.
+	eventTime := event.CreatedAt
+	if ef.Order != "" {
+		eventTime = event.PublishedTime()
+	}
+
+	if ef.Since != nil && eventTime < *ef.Since {
 		return false
 	}
 
-	if ef.Until != nil && event.CreatedAt > *ef.Until {
+	if ef.Until != nil && eventTime > *ef.Until {
 		return false
 	}
 
