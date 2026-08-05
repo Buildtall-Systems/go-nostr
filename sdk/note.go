@@ -22,17 +22,18 @@ func PrepareNoteEvent(evt *nostr.Event) {
 		}
 		switch b := block.Pointer.(type) {
 		case nostr.ProfilePointer:
-			// add b tag if not already present
-			if tag := evt.Tags.FindWithValue("b", b.PublicKey); tag == nil {
+			// add p tag if not already present
+			if tag := evt.Tags.FindWithValue("p", b.PublicKey); tag == nil {
 				evt.Tags = append(evt.Tags, b.AsTag())
 			}
 		case nostr.EventPointer:
 			// add e tag if not already present
-			if tag := evt.Tags.FindWithValue("q", b.ID); tag == nil {
+			if tag := evt.Tags.FindWithValue("e", b.ID); tag == nil {
 				evt.Tags = append(evt.Tags, b.AsTag())
 			}
 		case nostr.EntityPointer:
-			if tag := evt.Tags.FindWithValue("q", b.AsTagReference()); tag == nil {
+			// add a tag if not already present
+			if tag := evt.Tags.FindWithValue("a", b.AsTagReference()); tag == nil {
 				evt.Tags = append(evt.Tags, b.AsTag())
 			}
 		}
