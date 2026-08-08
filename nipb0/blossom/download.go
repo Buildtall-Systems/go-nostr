@@ -24,11 +24,15 @@ func (c *Client) OpenDownload(ctx context.Context, hash string) (io.ReadCloser, 
 		return nil, 0, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	authHeader := c.authorizationHeader(ctx, func(evt *nostr.Event) {
-		evt.Tags = append(evt.Tags, nostr.Tag{"t", "get"})
-		evt.Tags = append(evt.Tags, nostr.Tag{"x", hash})
-	})
-	req.Header.Add("Authorization", authHeader)
+	// GET authorization is optional in BUD-01, so a client built without a
+	// signer downloads bare rather than dereferencing the nil signer.
+	if c.signer != nil {
+		authHeader := c.authorizationHeader(ctx, func(evt *nostr.Event) {
+			evt.Tags = append(evt.Tags, nostr.Tag{"t", "get"})
+			evt.Tags = append(evt.Tags, nostr.Tag{"x", hash})
+		})
+		req.Header.Add("Authorization", authHeader)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

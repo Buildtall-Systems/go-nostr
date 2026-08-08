@@ -92,6 +92,46 @@ func TestOpenDownload(t *testing.T) {
 	}
 }
 
+func TestDownloadAuthorizationFollowsTheSigner(t *testing.T) {
+	hash := strings.Repeat("d", 64)
+	body := []byte("public-bytes")
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if _, err := w.Write(body); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	t.Run("nil signer downloads bare", func(t *testing.T) {
+		gotAuth = ""
+		c := NewClient(srv.URL, nil)
+		got, err := c.Download(context.Background(), hash)
+		if err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+		if string(got) != string(body) {
+			t.Errorf("body: want %q, got %q", body, got)
+		}
+		if gotAuth != "" {
+			t.Errorf("Authorization sent without a signer: %q", gotAuth)
+		}
+	})
+
+	t.Run("a signer still authorizes", func(t *testing.T) {
+		gotAuth = ""
+		c := NewClient(srv.URL, stubSigner{})
+		if _, err := c.Download(context.Background(), hash); err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+		if gotAuth == "" {
+			t.Error("Authorization absent with a signer present")
+		}
+	})
+}
+
 func TestOpenDownloadNotFound(t *testing.T) {
 	hash := strings.Repeat("c", 64)
 
