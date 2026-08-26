@@ -3,6 +3,8 @@ package blossom
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -21,9 +23,10 @@ func newUploadTestServer(t *testing.T, gotBody *[]byte, descriptorSize int) *htt
 			t.Errorf("read request body: %v", err)
 		}
 		*gotBody = data
+		sum := sha256.Sum256(data)
 		if err := json.NewEncoder(w).Encode(BlobDescriptor{
 			URL:    "https://blossom.example/blob",
-			SHA256: strings.Repeat("d", 64),
+			SHA256: hex.EncodeToString(sum[:]),
 			Size:   descriptorSize,
 		}); err != nil {
 			t.Errorf("write response: %v", err)
@@ -75,9 +78,14 @@ func TestUploadFileWithHeaders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPolicy = r.Header.Values("X-Access-Policy")
 		gotGrants = r.Header.Values("X-Access-Grant")
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		sum := sha256.Sum256(data)
 		if err := json.NewEncoder(w).Encode(BlobDescriptor{
 			URL:    "https://blossom.example/blob",
-			SHA256: strings.Repeat("d", 64),
+			SHA256: hex.EncodeToString(sum[:]),
 			Size:   len(content),
 		}); err != nil {
 			t.Errorf("write response: %v", err)
@@ -110,9 +118,14 @@ func TestUploadFileNoOptionsSendsNoExtraHeaders(t *testing.T) {
 	var gotPolicy []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPolicy = r.Header.Values("X-Access-Policy")
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		sum := sha256.Sum256(data)
 		if err := json.NewEncoder(w).Encode(BlobDescriptor{
 			URL:    "https://blossom.example/blob",
-			SHA256: strings.Repeat("d", 64),
+			SHA256: hex.EncodeToString(sum[:]),
 			Size:   len(content),
 		}); err != nil {
 			t.Errorf("write response: %v", err)
@@ -127,6 +140,31 @@ func TestUploadFileNoOptionsSendsNoExtraHeaders(t *testing.T) {
 	}
 	if len(gotPolicy) != 0 {
 		t.Errorf("X-Access-Policy: want none, got %v", gotPolicy)
+	}
+}
+
+func TestUploadFileMismatchedDescriptorHash(t *testing.T) {
+	content := []byte("plain-upload")
+	path := writeUploadInput(t, content)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		if err := json.NewEncoder(w).Encode(BlobDescriptor{
+			URL:    "https://blossom.example/blob",
+			SHA256: strings.Repeat("d", 64),
+			Size:   len(content),
+		}); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, stubSigner{})
+
+	if _, err := c.UploadFile(context.Background(), path); err == nil {
+		t.Fatal("UploadFile: want error on descriptor hash mismatch, got nil")
 	}
 }
 

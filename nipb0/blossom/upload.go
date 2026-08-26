@@ -10,6 +10,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -66,6 +67,7 @@ func (c *Client) uploadOpenFile(ctx context.Context, file *os.File, filePath str
 		return nil, fmt.Errorf("failed to read %s: %w", filePath, err)
 	}
 	hash := sha.Sum(nil)
+	wantHash := hex.EncodeToString(hash[:])
 
 	_, err = file.Seek(0, 0)
 	if err != nil {
@@ -85,11 +87,15 @@ func (c *Client) uploadOpenFile(ctx context.Context, file *os.File, filePath str
 	err = c.httpCall(ctx, "PUT", "upload", contentType, func() string {
 		return c.authorizationHeader(ctx, func(evt *nostr.Event) {
 			evt.Tags = append(evt.Tags, nostr.Tag{"t", "upload"})
-			evt.Tags = append(evt.Tags, nostr.Tag{"x", hex.EncodeToString(hash[:])})
+			evt.Tags = append(evt.Tags, nostr.Tag{"x", wantHash})
 		})
 	}, options.headers, body, size, &bd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload %s: %w", filePath, err)
+	}
+
+	if !strings.EqualFold(bd.SHA256, wantHash) {
+		return nil, fmt.Errorf("upload of %s returned mismatched descriptor: server reported sha256 %s, expected %s", filePath, bd.SHA256, wantHash)
 	}
 
 	return &bd, nil
