@@ -86,7 +86,7 @@ func New(ctx context.Context, pool *nostr.SimplePool, input string, opts *Signer
 		if err != nil {
 			return nil, err
 		}
-		return BunkerSigner{bunker}, nil
+		return BunkerSigner{bunker: bunker, timeout: opts.BunkerSignTimeout}, nil
 	} else if prefix, parsed, err := nip19.Decode(input); err == nil && prefix == "nsec" {
 		sec := parsed.(string)
 		pk, _ := nostr.GetPublicKey(sec)
