@@ -209,6 +209,27 @@ func TestBunkerSignerHonorsSignTimeout(t *testing.T) {
 	}
 }
 
+func TestWithTimeoutBoundsAClientBuiltSigner(t *testing.T) {
+	clientSecret, clientPubkey := newClientKey(t)
+	fb, srv := newFakeBunker(t, clientPubkey, func(nip46.Request) *nip46.Response { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	base := NewBunkerSignerFromBunkerClient(nip46.NewBunker(ctx, clientSecret, fb.signerPubkey, []string{srv.URL}, nil, nil))
+	bs := base.WithTimeout(testBunkerTimeout)
+	assert.Equal(t, testBunkerTimeout, bs.timeout)
+	assert.Zero(t, base.timeout, "WithTimeout must not change the signer it was called on")
+
+	done := make(chan error, 1)
+	go func() { done <- bs.SignEvent(context.Background(), &nostr.Event{Kind: nostr.KindTextNote}) }()
+	select {
+	case err := <-done:
+		require.Error(t, err, "an unanswered sign_event must fail once the bunker timeout elapses")
+	case <-time.After(testTimeout):
+		t.Fatal("SignEvent hung past the test deadline; WithTimeout was not honored")
+	}
+}
+
 func TestNewPassesBunkerSignTimeoutThrough(t *testing.T) {
 	clientSecret, clientPubkey := newClientKey(t)
 	fb, srv := newFakeBunker(t, clientPubkey, func(req nip46.Request) *nip46.Response {

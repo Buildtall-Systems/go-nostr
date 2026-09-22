@@ -29,6 +29,13 @@ func NewBunkerSignerFromBunkerClient(bc *nip46.BunkerClient) BunkerSigner {
 	return BunkerSigner{bunker: bc}
 }
 
+// WithTimeout returns a copy of the signer that bounds every bunker operation
+// at timeout, as SignerOptions.BunkerSignTimeout does through New.
+func (bs BunkerSigner) WithTimeout(timeout time.Duration) BunkerSigner {
+	bs.timeout = timeout
+	return bs
+}
+
 func (bs BunkerSigner) bounded(ctx context.Context, op string, fallback time.Duration) (context.Context, context.CancelFunc) {
 	timeout := bs.timeout
 	if timeout == 0 {
