@@ -289,7 +289,11 @@ func (bunker *BunkerClient) RPC(ctx context.Context, method string, params []str
 		bunker.expectingAuth.Delete(id)
 		bunker.listeners.Delete(id)
 	}()
-	hasWorked := make(chan struct{})
+	// One slot keeps the first success. Unbuffered, the non-blocking send
+	// below was dropped whenever a publish goroutine got there before RPC
+	// reached its select, and RPC then waited out its context on a request
+	// the signer had already answered.
+	hasWorked := make(chan struct{}, 1)
 
 	for i, url := range bunker.relays {
 		go func(url string, subscribed <-chan struct{}) {
