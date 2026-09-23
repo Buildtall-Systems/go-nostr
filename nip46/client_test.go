@@ -7,6 +7,7 @@ import (
 	stdjson "encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,8 +53,11 @@ func sendBunkerResponse(
 
 // signerHandler acts as the remote signer behind the fake relay: it answers
 // every RPC request with an auth_url challenge followed by a terminal response
-// carrying the same request id. It tolerates REQ and EVENT arriving in either
-// order on the shared connection.
+// carrying the same request id. A real signer sends the terminal response only
+// after the user approves at the auth URL, so when approved is not nil the
+// handler waits on it between the two. It tolerates REQ and EVENT arriving in
+// either order on the shared connection, and answers each REQ with EOSE as a
+// relay does.
 func signerHandler(
 	t *testing.T,
 	signerSecret string,
@@ -61,6 +65,7 @@ func signerHandler(
 	conversationKey [32]byte,
 	authURL string,
 	terminalResult string,
+	approved <-chan struct{},
 ) func(*websocket.Conn) {
 	return func(conn *websocket.Conn) {
 		var subID string
@@ -72,6 +77,9 @@ func signerHandler(
 			}
 			sendBunkerResponse(t, conn, subID, signerSecret, clientPubkey, conversationKey,
 				Response{ID: pending.ID, Result: "auth_url", Error: authURL})
+			if approved != nil {
+				<-approved
+			}
 			sendBunkerResponse(t, conn, subID, signerSecret, clientPubkey, conversationKey,
 				Response{ID: pending.ID, Result: terminalResult})
 			pending = nil
@@ -92,6 +100,9 @@ func signerHandler(
 			switch typ {
 			case "REQ":
 				if err := json.Unmarshal(raw[1], &subID); err != nil {
+					return
+				}
+				if err := websocket.JSON.Send(conn, []any{"EOSE", subID}); err != nil {
 					return
 				}
 				maybeRespond()
@@ -130,7 +141,8 @@ func TestAuthURLIsNonTerminalAndInvokesCallback(t *testing.T) {
 	require.NoError(t, err)
 
 	authURL := "https://signer.example/auth/1"
-	ws := newFakeRelay(signerHandler(t, signerSecret, clientPubkey, conversationKey, authURL, "ack"))
+	approved := make(chan struct{})
+	ws := newFakeRelay(signerHandler(t, signerSecret, clientPubkey, conversationKey, authURL, "ack", approved))
 	defer ws.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -139,6 +151,7 @@ func TestAuthURLIsNonTerminalAndInvokesCallback(t *testing.T) {
 	authReceived := make(chan string, 1)
 	bunker := NewBunker(ctx, clientSecret, signerPubkey, []string{ws.URL}, nil, func(url string) {
 		authReceived <- url
+		close(approved)
 	})
 
 	result, err := bunker.RPC(ctx, "ping", []string{})
@@ -164,7 +177,7 @@ func TestAuthURLWithNilCallbackDoesNotPanic(t *testing.T) {
 	conversationKey, err := nip44.GenerateConversationKey(clientPubkey, signerSecret)
 	require.NoError(t, err)
 
-	ws := newFakeRelay(signerHandler(t, signerSecret, clientPubkey, conversationKey, "https://signer.example/auth/2", "ack"))
+	ws := newFakeRelay(signerHandler(t, signerSecret, clientPubkey, conversationKey, "https://signer.example/auth/2", "ack", nil))
 	defer ws.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -175,4 +188,114 @@ func TestAuthURLWithNilCallbackDoesNotPanic(t *testing.T) {
 	result, err := bunker.RPC(ctx, "ping", []string{})
 	require.NoError(t, err)
 	assert.Equal(t, "ack", result)
+}
+
+// slowSubscriptionRelay registers each REQ only after registrationDelay and
+// then sends EOSE. The signer behind it answers every request at once, and,
+// as on a real relay, an answer that finds no registered subscription is lost.
+func slowSubscriptionRelay(
+	t *testing.T,
+	signerSecret string,
+	clientPubkey string,
+	conversationKey [32]byte,
+	registrationDelay time.Duration,
+) func(*websocket.Conn) {
+	return func(conn *websocket.Conn) {
+		var mu sync.Mutex
+		var subID string
+
+		send := func(msg []any) error {
+			mu.Lock()
+			defer mu.Unlock()
+			return websocket.JSON.Send(conn, msg)
+		}
+
+		for {
+			var raw []stdjson.RawMessage
+			if err := websocket.JSON.Receive(conn, &raw); err != nil {
+				return
+			}
+			if len(raw) < 2 {
+				continue
+			}
+			var typ string
+			if err := json.Unmarshal(raw[0], &typ); err != nil {
+				continue
+			}
+			switch typ {
+			case "REQ":
+				var id string
+				if err := json.Unmarshal(raw[1], &id); err != nil {
+					return
+				}
+				go func() {
+					time.Sleep(registrationDelay)
+					mu.Lock()
+					subID = id
+					mu.Unlock()
+					_ = send([]any{"EOSE", id})
+				}()
+			case "EVENT":
+				var evt nostr.Event
+				if err := json.Unmarshal(raw[1], &evt); err != nil {
+					return
+				}
+				if err := send([]any{"OK", evt.ID, true, ""}); err != nil {
+					return
+				}
+				plain, err := nip44.Decrypt(evt.Content, conversationKey)
+				if err != nil {
+					return
+				}
+				var req Request
+				if err := json.Unmarshal([]byte(plain), &req); err != nil {
+					return
+				}
+
+				mu.Lock()
+				registered := subID
+				mu.Unlock()
+				if registered == "" {
+					continue
+				}
+
+				content, err := nip44.Encrypt(Response{ID: req.ID, Result: "pong"}.String(), conversationKey)
+				require.NoError(t, err)
+				resp := nostr.Event{
+					CreatedAt: nostr.Now(),
+					Kind:      nostr.KindNostrConnect,
+					Tags:      nostr.Tags{{"p", clientPubkey}},
+					Content:   content,
+				}
+				require.NoError(t, resp.Sign(signerSecret))
+				if err := send([]any{"EVENT", registered, resp}); err != nil {
+					return
+				}
+			}
+		}
+	}
+}
+
+func TestRPCWaitsForTheResponseSubscription(t *testing.T) {
+	clientSecret := nostr.GeneratePrivateKey()
+	clientPubkey, err := nostr.GetPublicKey(clientSecret)
+	require.NoError(t, err)
+	signerSecret := nostr.GeneratePrivateKey()
+	signerPubkey, err := nostr.GetPublicKey(signerSecret)
+	require.NoError(t, err)
+
+	conversationKey, err := nip44.GenerateConversationKey(clientPubkey, signerSecret)
+	require.NoError(t, err)
+
+	ws := newFakeRelay(slowSubscriptionRelay(t, signerSecret, clientPubkey, conversationKey, 200*time.Millisecond))
+	defer ws.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	bunker := NewBunker(ctx, clientSecret, signerPubkey, []string{ws.URL}, nil, nil)
+
+	result, err := bunker.RPC(ctx, "ping", []string{})
+	require.NoError(t, err, "the answer to a request published before the relay registered the subscription was lost")
+	assert.Equal(t, "pong", result)
 }

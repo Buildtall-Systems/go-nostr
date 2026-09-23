@@ -117,6 +117,9 @@ func (fb *fakeBunker) serve(conn *websocket.Conn) {
 			if err := json.Unmarshal(raw[1], &subID); err != nil {
 				return
 			}
+			if err := websocket.JSON.Send(conn, []any{"EOSE", subID}); err != nil {
+				return
+			}
 			if !flush() {
 				return
 			}

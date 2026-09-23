@@ -22,6 +22,10 @@ type BunkerClient struct {
 	pool            *nostr.SimplePool
 	target          string
 	relays          []string
+	// subscribed[i] closes once relays[i] has answered the response
+	// subscription with EOSE. A request published before that can draw a
+	// response the relay has no subscription to deliver it to.
+	subscribed      []chan struct{}
 	conversationKey [32]byte // nip44
 	listeners       *xsync.MapOf[string, chan Response]
 	expectingAuth   *xsync.MapOf[string, struct{}]
@@ -112,61 +116,67 @@ func NewBunker(
 		idPrefix:        "gn-" + strconv.Itoa(rand.Intn(65536)),
 	}
 
-	// SimplePool.subMany normalizes the URL slice it is handed in place, and
-	// RPC iterates bunker.relays concurrently from the caller's goroutine.
-	// Give each its own copy so the two never touch the same backing array.
-	subscriptionRelays := slices.Clone(relays)
-
-	go func() {
-		now := nostr.Now()
-		events := pool.SubscribeMany(ctx, subscriptionRelays, nostr.Filter{
+	// One subscription per relay, so RPC can wait on each relay's own EOSE and
+	// a relay that never answers holds back only its own publish. Each call
+	// gets its own URL slice, because SimplePool.subMany normalizes it in place
+	// while RPC reads bunker.relays from the caller's goroutine.
+	now := nostr.Now()
+	bunker.subscribed = make([]chan struct{}, len(bunker.relays))
+	for i, relay := range bunker.relays {
+		subscribed := make(chan struct{})
+		bunker.subscribed[i] = subscribed
+		events := pool.SubscribeManyNotifyEOSE(ctx, []string{relay}, nostr.Filter{
 			Tags:      nostr.TagMap{"p": []string{clientPublicKey}},
 			Kinds:     []int{nostr.KindNostrConnect},
 			Since:     &now,
 			LimitZero: true,
-		}, nostr.WithLabel("bunker46client"))
-		for ie := range events {
-			if ie.Kind != nostr.KindNostrConnect {
-				continue
-			}
+		}, subscribed, nostr.WithLabel("bunker46client"))
 
-			var resp Response
-			plain, err := nip44.Decrypt(ie.Content, conversationKey)
-			if err != nil {
-				plain, err = nip04.Decrypt(ie.Content, sharedSecret)
-				if err != nil {
-					continue
-				}
+		go func() {
+			for ie := range events {
+				bunker.dispatch(ie, conversationKey, sharedSecret)
 			}
-
-			err = json.Unmarshal([]byte(plain), &resp)
-			if err != nil {
-				continue
-			}
-
-			if resp.Result == "auth_url" {
-				// special case
-				authURL := resp.Error
-				if _, ok := bunker.expectingAuth.Load(resp.ID); ok && bunker.onAuth != nil {
-					bunker.onAuth(authURL)
-				}
-				continue
-			}
-
-			if dispatcher, ok := bunker.listeners.Load(resp.ID); ok {
-				// Never block the dispatcher. A signer that answers one id
-				// twice would otherwise stall every later response for this
-				// client, since this loop is the only reader.
-				select {
-				case dispatcher <- resp:
-				default:
-				}
-				continue
-			}
-		}
-	}()
+		}()
+	}
 
 	return bunker
+}
+
+func (bunker *BunkerClient) dispatch(ie nostr.RelayEvent, conversationKey [32]byte, sharedSecret []byte) {
+	if ie.Kind != nostr.KindNostrConnect {
+		return
+	}
+
+	var resp Response
+	plain, err := nip44.Decrypt(ie.Content, conversationKey)
+	if err != nil {
+		plain, err = nip04.Decrypt(ie.Content, sharedSecret)
+		if err != nil {
+			return
+		}
+	}
+
+	if err := json.Unmarshal([]byte(plain), &resp); err != nil {
+		return
+	}
+
+	if resp.Result == "auth_url" {
+		// special case
+		authURL := resp.Error
+		if _, ok := bunker.expectingAuth.Load(resp.ID); ok && bunker.onAuth != nil {
+			bunker.onAuth(authURL)
+		}
+		return
+	}
+
+	if dispatcher, ok := bunker.listeners.Load(resp.ID); ok {
+		// Never block the dispatcher. A signer that answers one id twice
+		// would otherwise stall every later response on this relay's reader.
+		select {
+		case dispatcher <- resp:
+		default:
+		}
+	}
 }
 
 func (bunker *BunkerClient) Ping(ctx context.Context) error {
@@ -281,8 +291,13 @@ func (bunker *BunkerClient) RPC(ctx context.Context, method string, params []str
 	}()
 	hasWorked := make(chan struct{})
 
-	for _, url := range bunker.relays {
-		go func(url string) {
+	for i, url := range bunker.relays {
+		go func(url string, subscribed <-chan struct{}) {
+			select {
+			case <-subscribed:
+			case <-ctx.Done():
+				return
+			}
 			relay, err := bunker.pool.EnsureRelay(url)
 			if err == nil {
 				select {
@@ -291,7 +306,7 @@ func (bunker *BunkerClient) RPC(ctx context.Context, method string, params []str
 				}
 				relay.Publish(ctx, evt)
 			}
-		}(url)
+		}(url, bunker.subscribed[i])
 	}
 
 	select {
