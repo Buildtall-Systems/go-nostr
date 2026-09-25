@@ -125,11 +125,11 @@ func NewBunker(
 	for i, relay := range bunker.relays {
 		subscribed := make(chan struct{})
 		bunker.subscribed[i] = subscribed
+		// No limit 0: relays such as nostr-rs-relay send no EOSE for it, and RPC waits on EOSE.
 		events := pool.SubscribeManyNotifyEOSE(ctx, []string{relay}, nostr.Filter{
-			Tags:      nostr.TagMap{"p": []string{clientPublicKey}},
-			Kinds:     []int{nostr.KindNostrConnect},
-			Since:     &now,
-			LimitZero: true,
+			Tags:  nostr.TagMap{"p": []string{clientPublicKey}},
+			Kinds: []int{nostr.KindNostrConnect},
+			Since: &now,
 		}, subscribed, nostr.WithLabel("bunker46client"))
 
 		go func() {

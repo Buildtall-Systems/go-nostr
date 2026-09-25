@@ -299,3 +299,103 @@ func TestRPCWaitsForTheResponseSubscription(t *testing.T) {
 	require.NoError(t, err, "the answer to a request published before the relay registered the subscription was lost")
 	assert.Equal(t, "pong", result)
 }
+
+// needsHistoricalEvents mirrors nostr-rs-relay's Subscription rule: a REQ gets
+// a stored-event query, and so an EOSE, only when some filter is not limit 0.
+func needsHistoricalEvents(filters []stdjson.RawMessage) bool {
+	for _, raw := range filters {
+		var filter struct {
+			Limit *int `json:"limit"`
+		}
+		if err := json.Unmarshal(raw, &filter); err != nil {
+			return true
+		}
+		if filter.Limit == nil || *filter.Limit != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// realtimeOnlyRelay registers every REQ at once but, like nostr-rs-relay,
+// sends no EOSE for a subscription whose filters are all limit 0. The signer
+// behind it answers every request with "pong".
+func realtimeOnlyRelay(
+	t *testing.T,
+	signerSecret string,
+	clientPubkey string,
+	conversationKey [32]byte,
+) func(*websocket.Conn) {
+	return func(conn *websocket.Conn) {
+		var subID string
+		for {
+			var raw []stdjson.RawMessage
+			if err := websocket.JSON.Receive(conn, &raw); err != nil {
+				return
+			}
+			if len(raw) < 2 {
+				continue
+			}
+			var typ string
+			if err := json.Unmarshal(raw[0], &typ); err != nil {
+				continue
+			}
+			switch typ {
+			case "REQ":
+				if err := json.Unmarshal(raw[1], &subID); err != nil {
+					return
+				}
+				if needsHistoricalEvents(raw[2:]) {
+					if err := websocket.JSON.Send(conn, []any{"EOSE", subID}); err != nil {
+						return
+					}
+				}
+			case "EVENT":
+				var evt nostr.Event
+				if err := json.Unmarshal(raw[1], &evt); err != nil {
+					return
+				}
+				if err := websocket.JSON.Send(conn, []any{"OK", evt.ID, true, ""}); err != nil {
+					return
+				}
+				plain, err := nip44.Decrypt(evt.Content, conversationKey)
+				if err != nil {
+					return
+				}
+				var req Request
+				if err := json.Unmarshal([]byte(plain), &req); err != nil {
+					return
+				}
+				if subID == "" {
+					continue
+				}
+				sendBunkerResponse(t, conn, subID, signerSecret, clientPubkey, conversationKey,
+					Response{ID: req.ID, Result: "pong"})
+			}
+		}
+	}
+}
+
+func TestRPCGetsEOSEFromARelayThatSkipsItForLimitZero(t *testing.T) {
+	clientSecret := nostr.GeneratePrivateKey()
+	clientPubkey, err := nostr.GetPublicKey(clientSecret)
+	require.NoError(t, err)
+	signerSecret := nostr.GeneratePrivateKey()
+	signerPubkey, err := nostr.GetPublicKey(signerSecret)
+	require.NoError(t, err)
+
+	conversationKey, err := nip44.GenerateConversationKey(clientPubkey, signerSecret)
+	require.NoError(t, err)
+
+	ws := newFakeRelay(realtimeOnlyRelay(t, signerSecret, clientPubkey, conversationKey))
+	defer ws.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	bunker := NewBunker(ctx, clientSecret, signerPubkey, []string{ws.URL}, nil, nil)
+
+	result, err := bunker.RPC(ctx, "ping", []string{})
+	require.NoError(t, err, "RPC waits for an EOSE the relay never sends to a limit 0 subscription")
+	assert.Equal(t, "pong", result)
+}
