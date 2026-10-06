@@ -34,6 +34,12 @@ type SimplePool struct {
 
 	proactiveAuth bool
 
+	// relayLocks serializes EnsureRelay per relay URL. It belongs to this
+	// pool: a pool shared across every pool let one pool's proactive auth,
+	// held under the lock, block a signer whose own pool connects to the
+	// same relay, until the auth timed out.
+	relayLocks namedLocks
+
 	// custom things not often used
 	penaltyBoxMu sync.Mutex
 	penaltyBox   map[string][2]float64
@@ -176,7 +182,7 @@ var (
 // If the relay is not connected, it attempts to connect.
 func (pool *SimplePool) EnsureRelay(url string) (*Relay, error) {
 	nm := NormalizeURL(url)
-	defer namedLock(nm)()
+	defer pool.relayLocks.lock(nm)()
 
 	relay, ok := pool.Relays.Load(nm)
 	if ok && relay == nil {

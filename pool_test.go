@@ -170,6 +170,41 @@ func TestWithProactiveAuthAuthDoneClosed(t *testing.T) {
 	}
 }
 
+// A remote signer sends its requests through its own pool, which can need
+// the relay that the signing pool is still connecting to. Proactive auth
+// must not hold that pool back.
+func TestWithProactiveAuthThroughASignerOnTheSameRelay(t *testing.T) {
+	ws := newWebsocketServer(mockAuthAndPublishHandler("shared-relay-challenge"))
+	defer ws.Close()
+
+	url := strings.Replace(ws.URL, "http://", "ws://", 1)
+
+	signerPool := NewSimplePool(context.Background())
+	pool := NewSimplePool(context.Background(),
+		WithProactiveAuth(func(ctx context.Context, ae RelayEvent) error {
+			relay, err := signerPool.EnsureRelay(url)
+			if err != nil {
+				return err
+			}
+			defer relay.Close()
+			return ae.Event.Sign(GeneratePrivateKey())
+		}),
+	)
+
+	start := time.Now()
+	relay, err := pool.EnsureRelay(url)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	defer relay.Close()
+
+	assert.Less(t, elapsed, 2*time.Second, "the signer's pool waited on the signing pool's lock")
+	select {
+	case <-relay.AuthDone():
+	default:
+		t.Fatal("AuthDone should be closed after proactive auth in EnsureRelay")
+	}
+}
+
 // mockReplaceableHandler replays a fixed set of events for any REQ, then EOSE.
 // It drives FetchManyReplaceable against one deterministic relay.
 func mockReplaceableHandler(evts []Event) func(*websocket.Conn) {
