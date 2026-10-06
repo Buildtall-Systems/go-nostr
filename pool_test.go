@@ -182,11 +182,23 @@ func TestWithProactiveAuthThroughASignerOnTheSameRelay(t *testing.T) {
 	signerPool := NewSimplePool(context.Background())
 	pool := NewSimplePool(context.Background(),
 		WithProactiveAuth(func(ctx context.Context, ae RelayEvent) error {
-			relay, err := signerPool.EnsureRelay(url)
-			if err != nil {
-				return err
+			// As a signer's request does, give up when the auth does.
+			ready := make(chan error, 1)
+			go func() {
+				relay, err := signerPool.EnsureRelay(url)
+				if err == nil {
+					relay.Close()
+				}
+				ready <- err
+			}()
+			select {
+			case err := <-ready:
+				if err != nil {
+					return err
+				}
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			defer relay.Close()
 			return ae.Event.Sign(GeneratePrivateKey())
 		}),
 	)
