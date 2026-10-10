@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDecryptKeyFromNIPText(t *testing.T) {
@@ -58,4 +60,76 @@ func TestNormalization(t *testing.T) {
 	assert.True(t, slices.Equal(key1, key2), "normalization failed")
 	assert.True(t, slices.Equal(key2, key3), "normalization failed")
 	assert.True(t, slices.Equal(key3, key4), "normalization failed")
+}
+
+// reencode decodes an ncryptsec, lets edit change its payload bytes, and encodes it again.
+func reencode(t *testing.T, ncrypt string, edit func([]byte) []byte) string {
+	t.Helper()
+	_, bits5, err := bech32.DecodeNoLimit(ncrypt)
+	require.NoError(t, err)
+	data, err := bech32.ConvertBits(bits5, 5, 8, false)
+	require.NoError(t, err)
+	bits5, err = bech32.ConvertBits(edit(data), 8, 5, true)
+	require.NoError(t, err)
+	out, err := bech32.Encode("ncryptsec", bits5)
+	require.NoError(t, err)
+	return out
+}
+
+func TestDecryptRefusesWrongPayloadLength(t *testing.T) {
+	ncrypt, err := Encrypt("14c226dbdd865d5e1645e72c7470fd0a17feb42cc87b750bab6538171b3a3f8a", "pw", 1, 0x00)
+	require.NoError(t, err)
+
+	for name, edit := range map[string]func([]byte) []byte{
+		"one byte short": func(d []byte) []byte { return d[:len(d)-1] },
+		"one byte long":  func(d []byte) []byte { return append(d, 0) },
+		"version only":   func(d []byte) []byte { return d[:1] },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Decrypt(reencode(t, ncrypt, edit), "pw")
+			assert.ErrorIs(t, err, ErrInvalidPayload)
+		})
+	}
+}
+
+func TestDecryptRefusesLogNAboveDefaultMaximum(t *testing.T) {
+	ncrypt, err := Encrypt("14c226dbdd865d5e1645e72c7470fd0a17feb42cc87b750bab6538171b3a3f8a", "pw", 1, 0x00)
+	require.NoError(t, err)
+
+	// logn 40 asks scrypt for 1 TiB, so only a refusal before key derivation returns.
+	for _, logn := range []uint8{DefaultMaxLogN + 1, 40, 255} {
+		crafted := reencode(t, ncrypt, func(d []byte) []byte { d[1] = logn; return d })
+		_, err := Decrypt(crafted, "pw")
+		assert.ErrorIs(t, err, ErrLogNTooLarge, "logn %d", logn)
+		_, err = DecryptToBytes(crafted, "pw")
+		assert.ErrorIs(t, err, ErrLogNTooLarge, "logn %d", logn)
+	}
+}
+
+func TestDecryptBoundedRefusesLogNAboveCallerMaximum(t *testing.T) {
+	const secretKey = "f7f2f77f98890885462764afb15b68eb5f69979c8046ecb08cad7c4ae6b221ab"
+	ncrypt, err := Encrypt(secretKey, "pw", 10, 0x00)
+	require.NoError(t, err)
+
+	_, err = DecryptBounded(ncrypt, "pw", 9)
+	assert.ErrorIs(t, err, ErrLogNTooLarge)
+	_, err = DecryptToBytesBounded(ncrypt, "pw", 9)
+	assert.ErrorIs(t, err, ErrLogNTooLarge)
+
+	got, err := DecryptBounded(ncrypt, "pw", 10)
+	require.NoError(t, err)
+	assert.Equal(t, secretKey, got)
+}
+
+func TestDecryptBoundedRoundTripAtLogN16(t *testing.T) {
+	const secretKey = "11b25a101667dd9208db93c0827c6bdad66729a5b521156a7e9d3b22b3ae8944"
+	ncrypt, err := Encrypt(secretKey, "correct horse battery staple", 16, KnownToHaveBeenHandledInsecurely)
+	require.NoError(t, err)
+
+	got, err := DecryptBounded(ncrypt, "correct horse battery staple", 16)
+	require.NoError(t, err)
+	assert.Equal(t, secretKey, got)
+
+	_, err = DecryptBounded(ncrypt, "wrong password", 16)
+	assert.Error(t, err)
 }
