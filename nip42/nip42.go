@@ -69,6 +69,11 @@ func ValidateAuthEvent(event *nostr.Event, challenge string, relayURL string) (p
 		return "", false
 	}
 
+	// the signature covers the id, not the fields, so the id must match them
+	if !event.CheckID() {
+		return "", false
+	}
+
 	// save for last, as it is most expensive operation
 	// no need to check returned error, since ok == true implies err == nil.
 	if ok, _ := event.CheckSignature(); !ok {

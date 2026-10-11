@@ -43,18 +43,18 @@ func TestGroupEventBackAndForth(t *testing.T) {
 	require.NotNil(t, members2.Tags.GetFirst([]string{"p", CAROL}), "translation of group2 to members2 event failed")
 	require.NotNil(t, members2.Tags.GetFirst([]string{"p", DEREK}), "translation of group2 to members2 event failed")
 
-	group1.MergeInMembersEvent(members2)
+	require.NoError(t, group1.MergeInMembersEvent(members2))
 	require.Equal(t, 4, len(group1.Members), "merge of members2 into group1 failed")
 	require.Len(t, group1.Members[ALICE], 0, "merge of members2 into group1 failed")
 	require.Len(t, group1.Members[DEREK], 0, "merge of members2 into group1 failed")
 
-	group1.MergeInAdminsEvent(admins2)
+	require.NoError(t, group1.MergeInAdminsEvent(admins2))
 	require.Equal(t, 4, len(group1.Members), "merge of admins2 into group1 failed")
 
 	require.Equal(t, "nada", group1.Members[ALICE][0].Name, "merge of admins2 into group1 failed")
 	require.Len(t, group1.Members[DEREK], 0, "merge of admins2 into group1 failed")
 
-	group2.MergeInMetadataEvent(meta1)
+	require.NoError(t, group2.MergeInMetadataEvent(meta1))
 	require.Equal(t, "banana", group2.Name, "merge of meta1 into group2 failed")
 	require.Equal(t, "abc", group2.Address.ID, "merge of meta1 into group2 failed")
 }
